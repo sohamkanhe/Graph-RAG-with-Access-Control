@@ -29,6 +29,8 @@ docker compose up --build -d
 
 4. Open the web app at http://localhost:5173.
 
+The default local administrator is `admin@example.com` with password `AdminTitan!2026`. The app also seeds two normal users: `user.one@example.com` / `TitanUserOne!2026` and `user.two@example.com` / `TitanUserTwo!2026`. Change these values in `.env` before sharing the app.
+
 Useful endpoints:
 
 - Web app: http://localhost:5173
@@ -54,14 +56,17 @@ To switch users:
 1. Click **Sign out**.
 2. Sign in with the other email and password.
 
-## Upload a PDF
+## Admin upload and permissions
 
-1. Sign in.
-2. In **Add to your library**, choose a `.pdf` file.
-3. Click **Upload PDF**.
-4. Wait for the indexed chunk count confirmation.
+Only the administrator uploads PDFs. Normal users cannot upload files. Enter a document name before selecting access.
 
-Every uploaded document is connected to the uploading user in Neo4j with an ownership relationship. Its chunks are stored in Qdrant with the document ID.
+1. Sign in as the administrator.
+2. Choose a `.pdf` file in **Publish a protected document**.
+3. Enter a document name and user emails, departments, and/or roles as comma-separated values.
+4. Click **Publish PDF**.
+5. Wait for the indexed chunk count confirmation.
+
+The document is granted to the selected users, departments, and roles in Neo4j. Click a document in the admin list to view its permissions or delete it. Its chunks are stored in Qdrant with the document ID. Users appear in a list with a delete button; the administrator itself cannot be deleted.
 
 ## Ask questions
 
@@ -75,15 +80,24 @@ Every uploaded document is connected to the uploading user in Neo4j with an owne
 ## Verify two-user isolation
 
 1. Register User One with `user.one@example.com` and `TitanUserOne!2026`.
-2. Upload `Docker, Kuberneetes.pdf` while signed in as User One.
-3. Ask a question and confirm the answer lists User One's document source.
-4. Sign out.
-5. Register User Two with `user.two@example.com` and `TitanUserTwo!2026`.
-6. Upload the same PDF while signed in as User Two.
-7. Ask the same question and confirm User Two sees their own document ID.
-8. User Two must not see User One's document ID, and User One must not see User Two's document ID.
+2. Register User Two with `user.two@example.com` and `TitanUserTwo!2026`.
+3. Sign in as the admin and publish `Docker, Kuberneetes.pdf` with only `user.one@example.com` in the user access field.
+4. Ask the Docker question as User One and confirm an answer and citation appear.
+5. Ask the same question as User Two and confirm `No authorized documents matched this request.`
 
-The same PDF uploaded by two accounts becomes two different owned documents with separate document IDs.
+Normal users cannot call the admin upload endpoint. Access is controlled by explicit user, department, and role grants.
+
+For API-level group management, an admin can replace a user's memberships:
+
+```http
+POST /admin/users/{user_id}/groups
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{"departments":["finance"],"roles":["reviewer"]}
+```
+
+Send empty arrays to revoke the user's department and role memberships.
 
 ## Stop the application
 

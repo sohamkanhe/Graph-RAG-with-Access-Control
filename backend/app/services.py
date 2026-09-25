@@ -40,14 +40,9 @@ class AuthorizationGraph:
         SET d.title = item.title, d.tenant_id = 'acme'
         MERGE (dept)-[:CAN_READ]->(d)
         """
-        cleanup = """
-        MATCH (u:User)-[grant:MEMBER_OF|TEMPORARY_ACCESS]->()
-        DELETE grant
-        """
         with self.driver.session() as session:
             for constraint in constraints:
                 session.run(constraint).consume()
-            session.run(cleanup).consume()
             session.run(query, documents=DEMO_DOCUMENTS).consume()
 
     def provision_user(self, user_id: str, tenant_id: str):
@@ -69,12 +64,14 @@ class AuthorizationGraph:
         MATCH (u:User {id: $user_id, tenant_id: $tenant_id})
         OPTIONAL MATCH (u)-[:MEMBER_OF]->(:Department {tenant_id: $tenant_id})-[:CAN_READ]->(department_doc:Document {tenant_id: $tenant_id})
         WITH u, collect(DISTINCT department_doc.id) AS department_ids
+        OPTIONAL MATCH (u)-[:HAS_ROLE]->(:Role {tenant_id: $tenant_id})-[:CAN_READ]->(role_doc:Document {tenant_id: $tenant_id})
+        WITH u, department_ids, collect(DISTINCT role_doc.id) AS role_ids
         OPTIONAL MATCH (u)-[a:TEMPORARY_ACCESS]->(temporary_doc:Document {tenant_id: $tenant_id})
         WHERE a.expires_at IS NULL OR a.expires_at > datetime()
-        WITH u, department_ids, collect(DISTINCT temporary_doc.id) AS temporary_ids
-        OPTIONAL MATCH (u)-[:OWNS]->(owned_doc:Document {tenant_id: $tenant_id})
-        WITH department_ids, temporary_ids, collect(DISTINCT owned_doc.id) AS owned_ids
-        WITH department_ids + temporary_ids + owned_ids AS ids
+        WITH u, department_ids, role_ids, collect(DISTINCT temporary_doc.id) AS temporary_ids
+        OPTIONAL MATCH (u)-[:DIRECT_ACCESS]->(direct_doc:Document {tenant_id: $tenant_id})
+        WITH department_ids, role_ids, temporary_ids, collect(DISTINCT direct_doc.id) AS direct_ids
+        WITH department_ids + role_ids + temporary_ids + direct_ids AS ids
         UNWIND ids AS id
         WITH DISTINCT id WHERE id IS NOT NULL
         RETURN id
@@ -82,16 +79,94 @@ class AuthorizationGraph:
         with self.driver.session() as session:
             return [record["id"] for record in session.run(query, user_id=user_id, tenant_id=tenant_id)]
 
-    def create_owned_document(self, user_id: str, tenant_id: str, title: str) -> str:
+    def create_admin_document(self, tenant_id: str, title: str, user_entries: list[dict], departments: list[str], roles: list[str]) -> str:
         document_id = f"doc_{uuid4().hex}"
         query = """
-        MATCH (u:User {id: $user_id, tenant_id: $tenant_id})
         CREATE (d:Document {id: $document_id, title: $title, tenant_id: $tenant_id, created_at: datetime()})
-        CREATE (u)-[:OWNS]->(d)
+        FOREACH (entry IN $user_entries |
+            MERGE (u:User {id: entry.id, tenant_id: $tenant_id})
+            SET u.email = entry.email
+            MERGE (u)-[:DIRECT_ACCESS]->(d)
+        )
+        FOREACH (department_id IN $departments |
+            MERGE (department:Department {id: department_id, tenant_id: $tenant_id})
+            MERGE (department)-[:CAN_READ]->(d)
+        )
+        FOREACH (role_id IN $roles |
+            MERGE (role:Role {id: role_id, tenant_id: $tenant_id})
+            MERGE (role)-[:CAN_READ]->(d)
+        )
         """
         with self.driver.session() as session:
-            session.run(query, user_id=user_id, tenant_id=tenant_id, document_id=document_id, title=title).consume()
+            session.run(query, tenant_id=tenant_id, document_id=document_id, title=title, user_entries=user_entries, departments=departments, roles=roles).consume()
         return document_id
+
+    def grant_user_groups(self, user_id: str, tenant_id: str, departments: list[str], roles: list[str]):
+        query = """
+        MATCH (u:User {id: $user_id, tenant_id: $tenant_id})
+        OPTIONAL MATCH (u)-[old_membership:MEMBER_OF|HAS_ROLE]->()
+        DELETE old_membership
+        WITH u
+        FOREACH (department_id IN $departments |
+            MERGE (department:Department {id: department_id, tenant_id: $tenant_id})
+            MERGE (u)-[:MEMBER_OF]->(department)
+        )
+        FOREACH (role_id IN $roles |
+            MERGE (role:Role {id: role_id, tenant_id: $tenant_id})
+            MERGE (u)-[:HAS_ROLE]->(role)
+        )
+        """
+        with self.driver.session() as session:
+            session.run(query, user_id=user_id, tenant_id=tenant_id, departments=departments, roles=roles).consume()
+
+    def list_documents(self, tenant_id: str) -> list[dict]:
+        query = """
+        MATCH (d:Document {tenant_id: $tenant_id})
+        OPTIONAL MATCH (u:User)-[:DIRECT_ACCESS]->(d)
+        OPTIONAL MATCH (department:Department)-[:CAN_READ]->(d)
+        OPTIONAL MATCH (role:Role)-[:CAN_READ]->(d)
+                RETURN d.id AS id, d.title AS title,
+                        [x IN collect(DISTINCT u.email) WHERE x IS NOT NULL] AS user_emails
+        ORDER BY d.title
+        """
+        with self.driver.session() as session:
+            return [dict(record) for record in session.run(query, tenant_id=tenant_id)]
+
+    def set_document_users(self, document_id: str, tenant_id: str, users: list[dict]) -> bool:
+        query = """
+        MATCH (d:Document {id: $document_id, tenant_id: $tenant_id})
+        OPTIONAL MATCH (old:User)-[access:DIRECT_ACCESS]->(d)
+        DELETE access
+        WITH d
+        FOREACH (entry IN $users |
+            MERGE (u:User {id: entry.id, tenant_id: $tenant_id})
+            SET u.email = entry.email
+            MERGE (u)-[:DIRECT_ACCESS]->(d)
+        )
+        RETURN count(d) AS found
+        """
+        with self.driver.session() as session:
+            return bool(session.run(query, document_id=document_id, tenant_id=tenant_id, users=users).single()["found"])
+
+    def delete_document(self, document_id: str, tenant_id: str) -> bool:
+        query = """
+        MATCH (d:Document {id: $document_id, tenant_id: $tenant_id})
+        DETACH DELETE d
+        RETURN count(d) AS deleted
+        """
+        with self.driver.session() as session:
+            deleted = session.run(query, document_id=document_id, tenant_id=tenant_id).single()["deleted"]
+        if deleted:
+            self.qdrant.delete(COLLECTION, points_selector=models.FilterSelector(filter=models.Filter(must=[models.FieldCondition(key="document_id", match=models.MatchValue(value=document_id))])), wait=True)
+        return bool(deleted)
+
+    def delete_user(self, user_id: str, tenant_id: str):
+        query = """
+        MATCH (u:User {id: $user_id, tenant_id: $tenant_id})
+        DETACH DELETE u
+        """
+        with self.driver.session() as session:
+            session.run(query, user_id=user_id, tenant_id=tenant_id).consume()
 
 
 class RetrievalService:
@@ -101,10 +176,16 @@ class RetrievalService:
 
     def _embedding(self, text: str) -> list[float]:
         if self.gemini:
-            response = self.gemini.models.embed_content(model=settings.gemini_embedding_model, contents=[text])
-            return response.embeddings[0].values
+            try:
+                response = self.gemini.models.embed_content(model=settings.gemini_embedding_model, contents=[text])
+                return response.embeddings[0].values
+            except Exception:
+                return self._fallback_embedding(text, 3072)
         # Keep the full pipeline runnable locally when Gemini is not configured.
-        vector = [0.0] * 256
+        return self._fallback_embedding(text, 256)
+
+    def _fallback_embedding(self, text: str, size: int) -> list[float]:
+        vector = [0.0] * size
         for word in text.lower().split():
             vector[hash(word) % len(vector)] += 1.0
         magnitude = sum(value * value for value in vector) ** 0.5 or 1.0

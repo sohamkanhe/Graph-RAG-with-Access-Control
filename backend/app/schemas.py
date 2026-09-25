@@ -17,6 +17,23 @@ class AuthResponse(BaseModel):
     user: dict
 
 
+class UserSummary(BaseModel):
+    id: str
+    email: str
+    display_name: str
+    is_admin: bool
+
+
+class DocumentUsersRequest(BaseModel):
+    user_emails: list[EmailStr] = []
+
+
+class DocumentSummary(BaseModel):
+    id: str
+    title: str
+    user_emails: list[str]
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=1000)
 

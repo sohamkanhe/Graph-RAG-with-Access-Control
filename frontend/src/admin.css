@@ -1,0 +1,10 @@
+main:has(.admin-panel) > .search-card,
+main:has(.admin-panel) > .result,
+.admin-panel:not(.document-detail) > h3:last-of-type,
+.admin-panel:not(.document-detail) .user-list {
+  display: none;
+}
+
+.document-detail .user-picker {
+  margin-bottom: 18px;
+}
