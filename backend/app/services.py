@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from google import genai
-from google.genai import types
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient, models
 from .config import settings
@@ -172,13 +171,20 @@ class AuthorizationGraph:
 class RetrievalService:
     def __init__(self):
         self.qdrant = QdrantClient(url=settings.qdrant_url)
-        self.gemini = genai.Client(api_key=settings.google_api_key) if settings.google_api_key else None
+        self.embeddings = GoogleGenerativeAIEmbeddings(
+            model=settings.gemini_embedding_model,
+            google_api_key=settings.google_api_key,
+        ) if settings.google_api_key else None
+        self.chat = ChatGoogleGenerativeAI(
+            model=settings.gemini_chat_model,
+            temperature=settings.gemini_temperature,
+            google_api_key=settings.google_api_key,
+        ) if settings.google_api_key else None
 
     def _embedding(self, text: str) -> list[float]:
-        if self.gemini:
+        if self.embeddings:
             try:
-                response = self.gemini.models.embed_content(model=settings.gemini_embedding_model, contents=[text])
-                return response.embeddings[0].values
+                return self.embeddings.embed_query(text)
             except Exception:
                 return self._fallback_embedding(text, 3072)
         # Keep the full pipeline runnable locally when Gemini is not configured.
@@ -195,7 +201,7 @@ class RetrievalService:
         return None
 
     def seed_collection(self):
-        if not self.gemini:
+        if not self.chat:
             return
         size = len(self._embedding(DEMO_DOCUMENTS[0]["text"]))
         if self.qdrant.collection_exists(COLLECTION):
@@ -237,7 +243,7 @@ class RetrievalService:
     def synthesize(self, query: str, chunks: list[dict]) -> str:
         if not chunks:
             return "No authorized documents matched this request."
-        if not self.gemini:
+        if not self.chat:
             query_terms = {term.lower().strip(".,?!") for term in query.split() if len(term) > 2}
             relevant = [chunk for chunk in chunks if query_terms.intersection(chunk["text"].lower().split())]
             selected = relevant or chunks
@@ -252,12 +258,8 @@ Question: {query}
 
 Authorized sources:\n{context}"""
         try:
-            response = self.gemini.models.generate_content(
-                model=settings.gemini_chat_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=settings.gemini_temperature),
-            )
-            return response.text
-        except Exception:
+            return self.chat.invoke(prompt).content
+        except Exception as error:
+            print(f"[Synthesize Error] {type(error)}: {error}")
             excerpts = "\n".join(f"- {chunk['text']} [{chunk['document_id']}]" for chunk in chunks[:3])
             return f"The live model was unavailable, so here is an answer from the authorized sources:\n{excerpts}"

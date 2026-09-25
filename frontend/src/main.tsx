@@ -16,6 +16,85 @@ async function api(path: string, options: RequestInit = {}, token?: string) {
   return body
 }
 
+function parseMarkdownInline(text: string) {
+  const regex = /(\*\*[^*]+\*\*|\*[^*]+\*|\[doc_[a-zA-Z0-9_-]+\]|\[Source:[^\]]+\])/g
+  const parts: (string | JSX.Element)[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.substring(lastIndex, match.index))
+    }
+    const token = match[0]
+    if (token.startsWith('**') && token.endsWith('**')) {
+      parts.push(<strong key={match.index}>{token.slice(2, -2)}</strong>)
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      parts.push(<em key={match.index}>{token.slice(1, -1)}</em>)
+    } else if (token.startsWith('[doc_') || token.startsWith('[Source:')) {
+      parts.push(
+        <span key={match.index} className="citation-tag">
+          {token.slice(1, -1)}
+        </span>
+      )
+    } else {
+      parts.push(token)
+    }
+    lastIndex = regex.lastIndex
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.substring(lastIndex))
+  }
+  return parts
+}
+
+function FormattedAnswer({ text }: { text: string }) {
+  if (!text) return null
+  const blocks = text.split(/\n\s*\n/)
+
+  return (
+    <div className="formatted-answer">
+      {blocks.map((block, bIdx) => {
+        const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
+        if (lines.length === 0) return null
+
+        const isList = lines.every(l => /^([\*\-\•]|\d+\.)\s+/.test(l))
+
+        if (isList) {
+          return (
+            <ul key={bIdx} className="answer-list">
+              {lines.map((line, lIdx) => {
+                const cleanLine = line.replace(/^([\*\-\•]|\d+\.)\s+/, '')
+                return <li key={lIdx}>{parseMarkdownInline(cleanLine)}</li>
+              })}
+            </ul>
+          )
+        }
+
+        if (/^#{1,6}\s+/.test(lines[0])) {
+          const headerText = lines[0].replace(/^#{1,6}\s+/, '')
+          return (
+            <h4 key={bIdx} className="answer-header">
+              {parseMarkdownInline(headerText)}
+            </h4>
+          )
+        }
+
+        return (
+          <p key={bIdx} className="answer-paragraph">
+            {lines.map((line, lIdx) => (
+              <span key={lIdx}>
+                {parseMarkdownInline(line)}
+                {lIdx < lines.length - 1 && <br />}
+              </span>
+            ))}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
 function App() {
   const [token, setToken] = useState(localStorage.getItem('rag_token') || '')
   const [user, setUser] = useState<User | null>(null)
@@ -95,7 +174,7 @@ function App() {
   return <main><header><div className="brand"><div className="mark small">S</div><div><p className="eyebrow">PRIVATE DOCUMENT STUDIO</p><h1>{user.isAdmin ? 'Admin console' : 'My knowledge desk'}</h1></div></div><div className="user"><span>{user.displayName}</span><button className="link" onClick={signOut}>Sign out</button></div></header>
     {user.isAdmin ? (selected ? <section className="admin-panel document-detail"><button className="link" onClick={() => setSelected(null)}>← Back to documents</button><p className="eyebrow">DOCUMENT USERS</p><h2>{selected.title}</h2><p className="document-id">{selected.id}</p><p className="muted">Add a user by email. Delete removes that user’s access to this document.</p><div className="user-add-row"><input value={newEmail} onChange={event => setNewEmail(event.target.value)} placeholder="user@example.com" aria-label="User email to add" /><button type="button" onClick={addUser}>Add user</button></div><h3>Assigned users</h3><div className="user-list document-users">{assignedEmails.length ? assignedEmails.map(email => <div className="user-row" key={email}><span>{email}</span><button className="danger small-button" onClick={() => setAssignedEmails(assignedEmails.filter(item => item !== email))}>Delete</button></div>) : <p className="muted">No users assigned</p>}</div><button onClick={saveAccess} disabled={loading}>{loading ? 'Saving…' : 'Save user access'}</button>{uploadMessage && <p className="success">{uploadMessage}</p>}{error && <p className="error">{error}</p>}<button className="danger" onClick={() => deleteDocument(selected.id)}>Delete document</button></section> : <section className="admin-panel"><p className="eyebrow">ADMINISTRATOR CONTROLS</p><h2>Upload documents</h2><p className="muted">Upload first with no permissions. Click a document to manage its users.</p><form onSubmit={upload}><input name="document_name" placeholder="Document name" aria-label="Document name" required /><input name="file" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF" required /><button disabled={loading}>{loading ? 'Indexing…' : 'Upload PDF'}</button></form>{uploadMessage && <p className="success">{uploadMessage}</p>}{error && <p className="error">{error}</p>}<h3>Documents</h3><div className="document-list">{documents.map(item => <button className="document-row" key={item.id} onClick={() => { setSelected(item); setAssignedEmails(item.user_emails) }}><strong>{item.title}</strong><span>{item.user_emails.length} users assigned</span></button>)}</div></section>) : <section className="hero"><div><span className="badge">Your library is private</span><h2>Ask questions of documents your admin shared with you.</h2><p>Your administrator controls PDF uploads and permissions. You can search only assigned sources.</p></div><div className="pipeline"><div><b>01</b><span>Authorize</span></div><i /><div><b>02</b><span>Retrieve</span></div><i /><div><b>03</b><span>Answer</span></div></div></section>}
     {!user.isAdmin && <section className="search-card"><p className="eyebrow">ASK YOUR LIBRARY</p><h3>What do you want to know?</h3><form onSubmit={ask}><input name="query" defaultValue="What are the deployment risks for Project Titan?" aria-label="Ask a question" required minLength={3} /><button disabled={loading}>{loading ? 'Searching…' : 'Ask'}</button></form>{error && <p className="error">{error}</p>}</section>}
-    {!user.isAdmin && result && <section className="result"><div className="result-heading"><div><p className="eyebrow">ANSWER FROM YOUR SOURCES</p><h2>Here’s what I found</h2></div><span className="badge">{result.authorized_document_count} authorized documents</span></div><article>{result.answer}</article><h3>Sources used</h3><div className="citations">{result.citations.map(citation => <div className="citation" key={citation.document_id}><b>{citation.document_id}</b><strong>{citation.title}</strong><p>{citation.excerpt}</p></div>)}</div></section>}</main>
+    {!user.isAdmin && result && <section className="result"><div className="result-heading"><div><p className="eyebrow">ANSWER FROM YOUR SOURCES</p><h2>Here’s what I found</h2></div><span className="badge">{result.authorized_document_count} authorized documents</span></div><article><FormattedAnswer text={result.answer} /></article><h3>Sources used</h3><div className="citations">{result.citations.map(citation => <div className="citation" key={citation.document_id}><b>{citation.document_id}</b><strong>{citation.title}</strong><p>{citation.excerpt}</p></div>)}</div></section>}</main>
 }
 
 createRoot(document.getElementById('root')!).render(<App />)
