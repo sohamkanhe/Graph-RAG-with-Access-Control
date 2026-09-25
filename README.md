@@ -122,6 +122,8 @@ docker compose up --build -d
 - **FastAPI Backend**: http://localhost:8000
 - **Interactive API Docs (Swagger UI)**: http://localhost:8000/docs
 - **Neo4j Browser**: http://localhost:7474 (Username: `neo4j`, Password: `neo4j-local-password`)
+- **Interactive API Docs (Swagger UI)**: http://localhost:8000/docs
+- **Interactive API Docs (Swagger UI)**:  http://localhost:6333/dashboard
 
 ### Stop Services
 
