@@ -2,21 +2,100 @@ import { FormEvent, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import './admin.css'
+
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 type User = { id: string; email: string; displayName: string; isAdmin?: boolean; is_admin?: boolean }
-type Result = { answer: string; citations: { document_id: string; title: string; excerpt: string }[]; authorized_document_count: number }
-type AdminDocument = { id: string; title: string; user_emails: string[]; departments: string[]; roles: string[] }
-async function api(path: string, options: RequestInit = {}, token?: string) { const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } }); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || 'Request failed'); return body }
-function App() {
- const [token,setToken]=useState(localStorage.getItem('rag_token')||''); const [user,setUser]=useState<User|null>(null); const [mode,setMode]=useState<'login'|'register'>('login'); const [error,setError]=useState(''); const [loading,setLoading]=useState(false); const [result,setResult]=useState<Result|null>(null); const [uploadMessage,setUploadMessage]=useState(''); const [adminUsers,setAdminUsers]=useState<User[]>([]); const [adminDocuments,setAdminDocuments]=useState<AdminDocument[]>([]); const [selectedDocument,setSelectedDocument]=useState<AdminDocument|null>(null); const [selectedUserEmails,setSelectedUserEmails]=useState<string[]>([])
- useEffect(()=>{if(token) api('/auth/me',{},token).then((account)=>{setUser(account);if(account.isAdmin){api('/admin/users',{},token).then(setAdminUsers).catch(()=>{});api('/admin/documents',{},token).then(setAdminDocuments).catch(()=>{})}}).catch(()=>{localStorage.removeItem('rag_token');setToken('')})},[token])
- async function authenticate(e:FormEvent<HTMLFormElement>){e.preventDefault();setError('');setLoading(true);const f=new FormData(e.currentTarget);try{const body=await api(`/auth/${mode}`,{method:'POST',body:JSON.stringify({email:f.get('email'),password:f.get('password'),...(mode==='register'?{display_name:f.get('displayName')}:{})})});localStorage.setItem('rag_token',body.access_token);setToken(body.access_token);setUser(body.user)}catch(e){setError(e instanceof Error?e.message:'Could not authenticate')}finally{setLoading(false)}}
- async function search(e:FormEvent<HTMLFormElement>){e.preventDefault();setError('');setLoading(true);setResult(null);const query=String(new FormData(e.currentTarget).get('query')||'');try{setResult(await api('/search',{method:'POST',body:JSON.stringify({query})},token))}catch(e){setError(e instanceof Error?e.message:'Search failed')}finally{setLoading(false)}}
- async function upload(e:FormEvent<HTMLFormElement>){e.preventDefault();setError('');setUploadMessage('');const form=e.currentTarget;const data=new FormData(form);const file=data.get('file') as File;if(!file?.name){setError('Choose a PDF first');return}setLoading(true);try{const response=await fetch(`${API_URL}/admin/documents/upload`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:data});const body=await response.json();if(!response.ok)throw new Error(body.detail||'Upload failed');setUploadMessage(`${body.title} indexed securely (${body.chunk_count} chunks).`);setAdminDocuments(await api('/admin/documents',{},token));form.reset()}catch(e){setError(e instanceof Error?e.message:'Upload failed')}finally{setLoading(false)}}
- async function deleteAdminUser(userId:string){if(!window.confirm('Delete this user?'))return;try{await api(`/admin/users/${userId}`,{method:'DELETE'},token);setAdminUsers(adminUsers.filter(item=>item.id!==userId))}catch(e){setError(e instanceof Error?e.message:'Could not delete user')}}
- async function deleteAdminDocument(documentId:string){if(!window.confirm('Delete this document and its indexed chunks?'))return;try{await api(`/admin/documents/${documentId}`,{method:'DELETE'},token);setAdminDocuments(adminDocuments.filter(item=>item.id!==documentId));setSelectedDocument(null)}catch(e){setError(e instanceof Error?e.message:'Could not delete document')}}
- async function saveDocumentUsers(){if(!selectedDocument)return;setLoading(true);try{const updated=await api(`/admin/documents/${selectedDocument.id}/users`,{method:'POST',body:JSON.stringify({user_emails:selectedUserEmails})},token);setSelectedDocument(updated);setAdminDocuments(adminDocuments.map(item=>item.id===updated.id?updated:item));setUploadMessage('User access saved.')}catch(e){setError(e instanceof Error?e.message:'Could not save user access')}finally{setLoading(false)}}
- if(!user)return <main className="auth-shell"><section className="auth-card"><div className="mark">S</div><p className="eyebrow">PRIVATE DOCUMENT STUDIO</p><h1>Answers from your library.</h1><p className="muted">Sign in to search only the PDFs assigned to your account. Every upload stays private to its owner.</p><form onSubmit={authenticate}>{mode==='register'&&<label>Full name<input name="displayName" placeholder="Alex Morgan" required minLength={2}/></label>}<label>Email<input name="email" type="email" placeholder="you@company.com" required/></label><label>Password<input name="password" type="password" placeholder="At least 10 characters" minLength={10} required/></label>{error&&<p className="error">{error}</p>}<button disabled={loading}>{loading?'Checking…':mode==='login'?'Open my library':'Create my library'}</button></form><button className="link" onClick={()=>{setMode(mode==='login'?'register':'login');setError('')}}>{mode==='login'?'New here? Create an account':'Already registered? Sign in'}</button></section></main>
- return <main><header><div className="brand"><div className="mark small">S</div><div><p className="eyebrow">PRIVATE DOCUMENT STUDIO</p><h1>{user.isAdmin?'Admin console':'My knowledge desk'}</h1></div></div><div className="user"><span>{user.displayName}</span><button className="link" onClick={()=>{localStorage.removeItem('rag_token');setToken('');setUser(null);setResult(null)}}>Sign out</button></div></header>{user.isAdmin?(selectedDocument?<section className="admin-panel document-detail"><button className="link" onClick={()=>setSelectedDocument(null)}>← Back to documents</button><p className="eyebrow">SET USER ACCESS</p><h2>{selectedDocument.title}</h2><p className="document-id">{selectedDocument.id}</p><p className="muted">Choose the users who can retrieve this document. Uploads start with no access.</p><div className="user-picker">{adminUsers.filter(item=>!item.isAdmin&&!item.is_admin).map(item=><label key={item.id}><input type="checkbox" checked={selectedUserEmails.includes(item.email)} onChange={event=>setSelectedUserEmails(event.target.checked?[...selectedUserEmails,item.email]:selectedUserEmails.filter(email=>email!==item.email))}/>{item.email}</label>)}</div><button onClick={saveDocumentUsers} disabled={loading}>{loading?'Saving…':'Save user access'}</button>{uploadMessage&&<p className="success">{uploadMessage}</p>}{error&&<p className="error">{error}</p>}<button className="danger" onClick={()=>deleteAdminDocument(selectedDocument.id)}>Delete document</button></section>:<section className="admin-panel"><p className="eyebrow">ADMINISTRATOR CONTROLS</p><h2>Upload documents first</h2><p className="muted">Uploads begin with no permissions. Click a document below to assign User One or User Two.</p><form onSubmit={upload}><input name="document_name" placeholder="Document name" aria-label="Document name" required/><input name="file" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF" required/><button disabled={loading}>{loading?'Indexing…':'Upload PDF'}</button></form>{uploadMessage&&<p className="success">{uploadMessage}</p>}{error&&<p className="error">{error}</p>}<h3>Documents</h3><div className="document-list">{adminDocuments.map(item=><button className="document-row" key={item.id} onClick={()=>{setSelectedDocument(item);setSelectedUserEmails(item.user_emails.filter(Boolean))}}><strong>{item.title}</strong><span>{item.user_emails.filter(Boolean).length} users assigned</span></button>)}</div><h3>Users</h3><div className="user-list">{adminUsers.filter(item=>!item.isAdmin&&!item.is_admin).map(item=><div className="user-row" key={item.id}><span>{item.email}</span><button className="danger small-button" onClick={()=>deleteAdminUser(item.id)}>Delete</button></div>)}</div></section>):<section className="hero"><div><span className="badge">Your library is private</span><h2>Ask questions of documents your admin shared with you.</h2><p>Your administrator controls PDF uploads and permissions. You can search only the sources assigned to your account.</p></div><div className="pipeline"><div><b>01</b><span>Authorize</span></div><i/><div><b>02</b><span>Retrieve</span></div><i/><div><b>03</b><span>Answer</span></div></div></section>}<section className="search-card"><p className="eyebrow">ASK YOUR LIBRARY</p><h3>What do you want to know?</h3><form onSubmit={search}><input name="query" defaultValue="What are the deployment risks for Project Titan?" aria-label="Ask a question" required minLength={3}/><button disabled={loading}>{loading?'Searching…':'Ask'}</button></form>{!user.isAdmin&&error&&<p className="error">{error}</p>}</section>{result&&<section className="result"><div className="result-heading"><div><p className="eyebrow">ANSWER FROM YOUR SOURCES</p><h2>Here’s what I found</h2></div><span className="badge">{result.authorized_document_count} authorized documents</span></div><article>{result.answer}</article><h3>Sources used</h3><div className="citations">{result.citations.map(c=><div className="citation" key={c.document_id}><b>{c.document_id}</b><strong>{c.title}</strong><p>{c.excerpt}</p></div>)}</div></section>}</main>
+type Citation = { document_id: string; title: string; excerpt: string }
+type Result = { answer: string; citations: Citation[]; authorized_document_count: number }
+type AdminDocument = { id: string; title: string; user_emails: string[] }
+
+async function api(path: string, options: RequestInit = {}, token?: string) {
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.detail || 'Request failed')
+  return body
 }
-createRoot(document.getElementById('root')!).render(<App/>)
+
+function App() {
+  const [token, setToken] = useState(localStorage.getItem('rag_token') || '')
+  const [user, setUser] = useState<User | null>(null)
+  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<Result | null>(null)
+  const [uploadMessage, setUploadMessage] = useState('')
+  const [adminUsers, setAdminUsers] = useState<User[]>([])
+  const [documents, setDocuments] = useState<AdminDocument[]>([])
+  const [selected, setSelected] = useState<AdminDocument | null>(null)
+  const [assignedEmails, setAssignedEmails] = useState<string[]>([])
+  const [newEmail, setNewEmail] = useState('')
+
+  useEffect(() => {
+    if (!token) return
+    api('/auth/me', {}, token).then(account => {
+      setUser(account)
+      if (account.isAdmin) {
+        api('/admin/users', {}, token).then(setAdminUsers).catch(() => {})
+        api('/admin/documents', {}, token).then(setDocuments).catch(() => {})
+      }
+    }).catch(() => { localStorage.removeItem('rag_token'); setToken('') })
+  }, [token])
+
+  async function authenticate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(''); setLoading(true)
+    const form = new FormData(event.currentTarget)
+    try {
+      const body = await api(`/auth/${mode}`, { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), ...(mode === 'register' ? { display_name: form.get('displayName') } : {}) }) })
+      localStorage.setItem('rag_token', body.access_token); setToken(body.access_token); setUser(body.user)
+    } catch (exception) { setError(exception instanceof Error ? exception.message : 'Could not authenticate') } finally { setLoading(false) }
+  }
+
+  async function upload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(''); setUploadMessage(''); setLoading(true)
+    const form = event.currentTarget; const data = new FormData(form)
+    try {
+      const response = await fetch(`${API_URL}/admin/documents/upload`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: data })
+      const body = await response.json(); if (!response.ok) throw new Error(body.detail || 'Upload failed')
+      setUploadMessage(`${body.title} indexed securely (${body.chunk_count} chunks).`); setDocuments(await api('/admin/documents', {}, token)); form.reset()
+    } catch (exception) { setError(exception instanceof Error ? exception.message : 'Upload failed') } finally { setLoading(false) }
+  }
+
+  async function ask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(''); setLoading(true); setResult(null)
+    const query = String(new FormData(event.currentTarget).get('query') || '')
+    try { setResult(await api('/search', { method: 'POST', body: JSON.stringify({ query }) }, token)) } catch (exception) { setError(exception instanceof Error ? exception.message : 'Search failed') } finally { setLoading(false) }
+  }
+
+  function addUser() {
+    const email = newEmail.trim().toLowerCase()
+    const valid = adminUsers.some(item => item.email === email && !item.isAdmin && !item.is_admin)
+    if (!valid) { setError('Enter an existing normal user email'); return }
+    if (!assignedEmails.includes(email)) setAssignedEmails([...assignedEmails, email])
+    setNewEmail(''); setError('')
+  }
+
+  async function saveAccess() {
+    if (!selected) return
+    setLoading(true)
+    try {
+      const updated = await api(`/admin/documents/${selected.id}/users`, { method: 'POST', body: JSON.stringify({ user_emails: assignedEmails }) }, token)
+      setSelected(updated); setDocuments(documents.map(item => item.id === updated.id ? updated : item)); setUploadMessage('User access saved.')
+    } catch (exception) { setError(exception instanceof Error ? exception.message : 'Could not save user access') } finally { setLoading(false) }
+  }
+
+  async function deleteDocument(id: string) {
+    if (!window.confirm('Delete this document and its indexed chunks?')) return
+    await api(`/admin/documents/${id}`, { method: 'DELETE' }, token); setDocuments(documents.filter(item => item.id !== id)); setSelected(null)
+  }
+
+  function signOut() { localStorage.removeItem('rag_token'); setToken(''); setUser(null); setResult(null) }
+
+  if (!user) return <main className="auth-shell"><section className="auth-card"><div className="mark">S</div><p className="eyebrow">PRIVATE DOCUMENT STUDIO</p><h1>Answers from your library.</h1><p className="muted">Sign in to search only the PDFs assigned to your account.</p><form onSubmit={authenticate}>{mode === 'register' && <label>Full name<input name="displayName" required minLength={2} /></label>}<label>Email<input name="email" type="email" required /></label><label>Password<input name="password" type="password" minLength={10} required /></label>{error && <p className="error">{error}</p>}<button disabled={loading}>{loading ? 'Checking…' : mode === 'login' ? 'Open my library' : 'Create my library'}</button></form><button className="link" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? 'New here? Create an account' : 'Already registered? Sign in'}</button></section></main>
+
+  return <main><header><div className="brand"><div className="mark small">S</div><div><p className="eyebrow">PRIVATE DOCUMENT STUDIO</p><h1>{user.isAdmin ? 'Admin console' : 'My knowledge desk'}</h1></div></div><div className="user"><span>{user.displayName}</span><button className="link" onClick={signOut}>Sign out</button></div></header>
+    {user.isAdmin ? (selected ? <section className="admin-panel document-detail"><button className="link" onClick={() => setSelected(null)}>← Back to documents</button><p className="eyebrow">DOCUMENT USERS</p><h2>{selected.title}</h2><p className="document-id">{selected.id}</p><p className="muted">Add a user by email. Delete removes that user’s access to this document.</p><div className="user-add-row"><input value={newEmail} onChange={event => setNewEmail(event.target.value)} placeholder="user@example.com" aria-label="User email to add" /><button type="button" onClick={addUser}>Add user</button></div><h3>Assigned users</h3><div className="user-list document-users">{assignedEmails.length ? assignedEmails.map(email => <div className="user-row" key={email}><span>{email}</span><button className="danger small-button" onClick={() => setAssignedEmails(assignedEmails.filter(item => item !== email))}>Delete</button></div>) : <p className="muted">No users assigned</p>}</div><button onClick={saveAccess} disabled={loading}>{loading ? 'Saving…' : 'Save user access'}</button>{uploadMessage && <p className="success">{uploadMessage}</p>}{error && <p className="error">{error}</p>}<button className="danger" onClick={() => deleteDocument(selected.id)}>Delete document</button></section> : <section className="admin-panel"><p className="eyebrow">ADMINISTRATOR CONTROLS</p><h2>Upload documents</h2><p className="muted">Upload first with no permissions. Click a document to manage its users.</p><form onSubmit={upload}><input name="document_name" placeholder="Document name" aria-label="Document name" required /><input name="file" type="file" accept="application/pdf,.pdf" aria-label="Choose a PDF" required /><button disabled={loading}>{loading ? 'Indexing…' : 'Upload PDF'}</button></form>{uploadMessage && <p className="success">{uploadMessage}</p>}{error && <p className="error">{error}</p>}<h3>Documents</h3><div className="document-list">{documents.map(item => <button className="document-row" key={item.id} onClick={() => { setSelected(item); setAssignedEmails(item.user_emails) }}><strong>{item.title}</strong><span>{item.user_emails.length} users assigned</span></button>)}</div></section>) : <section className="hero"><div><span className="badge">Your library is private</span><h2>Ask questions of documents your admin shared with you.</h2><p>Your administrator controls PDF uploads and permissions. You can search only assigned sources.</p></div><div className="pipeline"><div><b>01</b><span>Authorize</span></div><i /><div><b>02</b><span>Retrieve</span></div><i /><div><b>03</b><span>Answer</span></div></div></section>}
+    {!user.isAdmin && <section className="search-card"><p className="eyebrow">ASK YOUR LIBRARY</p><h3>What do you want to know?</h3><form onSubmit={ask}><input name="query" defaultValue="What are the deployment risks for Project Titan?" aria-label="Ask a question" required minLength={3} /><button disabled={loading}>{loading ? 'Searching…' : 'Ask'}</button></form>{error && <p className="error">{error}</p>}</section>}
+    {!user.isAdmin && result && <section className="result"><div className="result-heading"><div><p className="eyebrow">ANSWER FROM YOUR SOURCES</p><h2>Here’s what I found</h2></div><span className="badge">{result.authorized_document_count} authorized documents</span></div><article>{result.answer}</article><h3>Sources used</h3><div className="citations">{result.citations.map(citation => <div className="citation" key={citation.document_id}><b>{citation.document_id}</b><strong>{citation.title}</strong><p>{citation.excerpt}</p></div>)}</div></section>}</main>
+}
+
+createRoot(document.getElementById('root')!).render(<App />)
