@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
@@ -9,7 +10,25 @@ from .config import settings
 from .database import Base, engine, get_db, migrate_users_table
 from .models import User
 from pypdf import PdfReader
-from .schemas import AuthResponse, DocumentSummary, DocumentUploadResponse, DocumentUsersRequest, LoginRequest, RegisterRequest, SearchRequest, SearchResponse, UserSummary
+from .schemas import (
+    AuthResponse,
+    CreateDepartmentRequest,
+    CreateRoleRequest,
+    DepartmentSummary,
+    DepartmentUpdateRequest,
+    DocumentPermissionsRequest,
+    DocumentSummary,
+    DocumentUploadResponse,
+    LoginRequest,
+    RegisterRequest,
+    RoleSummary,
+    RoleUpdateRequest,
+    SearchRequest,
+    SearchResponse,
+    UserDetail,
+    UserPermissionsRequest,
+    UserSummary,
+)
 from .security import admin_user, create_token, current_user, hash_password, new_user_id, verify_password
 from .services import AuthorizationGraph, RetrievalService
 
@@ -85,6 +104,33 @@ def admin_users(_: User = Depends(admin_user), db: Session = Depends(get_db)):
     return db.scalars(select(User).order_by(User.email)).all()
 
 
+@app.get("/admin/users/{user_id}", response_model=UserDetail)
+def admin_user_detail(user_id: str, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    target = db.get(User, user_id)
+    if not target or target.tenant_id != admin.tenant_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    details = graph.get_user_details(target.id, target.tenant_id)
+    return {
+        "id": target.id,
+        "email": target.email,
+        "display_name": target.display_name,
+        "is_admin": target.is_admin,
+        "departments": details.get("departments", []),
+        "roles": details.get("roles", []),
+        "direct_document_ids": details.get("direct_document_ids", []),
+        "all_allowed_documents": details.get("all_allowed_documents", []),
+    }
+
+
+@app.post("/admin/users/{user_id}/permissions", response_model=UserDetail)
+def admin_user_permissions(user_id: str, payload: UserPermissionsRequest, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    target = db.get(User, user_id)
+    if not target or target.tenant_id != admin.tenant_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    graph.update_user_permissions(target.id, target.tenant_id, payload.departments, payload.roles, payload.direct_document_ids)
+    return admin_user_detail(user_id, admin, db)
+
+
 @app.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(user_id: str, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
     target = db.get(User, user_id)
@@ -106,16 +152,88 @@ def delete_document(document_id: str, admin: User = Depends(admin_user)):
         raise HTTPException(status_code=404, detail="Document not found")
 
 
-@app.post("/admin/documents/{document_id}/users", response_model=DocumentSummary)
-def set_document_users(document_id: str, payload: DocumentUsersRequest, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+@app.post("/admin/documents/{document_id}/permissions", response_model=DocumentSummary)
+def set_document_permissions(document_id: str, payload: DocumentPermissionsRequest, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
     emails = [str(email).lower() for email in payload.user_emails]
-    users = db.scalars(select(User).where(User.email.in_(emails), User.tenant_id == admin.tenant_id, User.is_admin.is_(False))).all()
+    users = db.scalars(select(User).where(User.email.in_(emails), User.tenant_id == admin.tenant_id, User.is_admin.is_(False))).all() if emails else []
     if len(users) != len(set(emails)):
         raise HTTPException(status_code=400, detail="Choose existing non-admin users only")
-    if not graph.set_document_users(document_id, admin.tenant_id, [{"id": item.id, "email": item.email} for item in users]):
+    user_entries = [{"id": u.id, "email": u.email} for u in users]
+    if not graph.set_document_permissions(document_id, admin.tenant_id, user_entries, payload.departments, payload.roles):
         raise HTTPException(status_code=404, detail="Document not found")
     return next(item for item in graph.list_documents(admin.tenant_id) if item["id"] == document_id)
 
+
+@app.get("/admin/departments", response_model=list[DepartmentSummary])
+def admin_departments(admin: User = Depends(admin_user)):
+    return graph.list_departments(admin.tenant_id)
+
+
+@app.post("/admin/departments", response_model=DepartmentSummary, status_code=status.HTTP_201_CREATED)
+def create_department(payload: CreateDepartmentRequest, admin: User = Depends(admin_user)):
+    return graph.create_department(admin.tenant_id, payload.name)
+
+
+@app.post("/admin/departments/{department_id}", response_model=DepartmentSummary)
+def update_department(department_id: str, payload: DepartmentUpdateRequest, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    emails = [str(email).lower() for email in payload.user_emails]
+    users = db.scalars(select(User).where(User.email.in_(emails), User.tenant_id == admin.tenant_id, User.is_admin.is_(False))).all() if emails else []
+    if len(users) != len(set(emails)):
+        raise HTTPException(status_code=400, detail="Choose existing non-admin users only")
+    user_entries = [{"id": u.id, "email": u.email} for u in users]
+    graph.set_department_members_and_docs(admin.tenant_id, department_id, user_entries, payload.document_ids)
+    depts = graph.list_departments(admin.tenant_id)
+    target = next((d for d in depts if d["id"] == department_id.lower()), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Department not found")
+    return target
+
+
+@app.delete("/admin/departments/{department_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_department(department_id: str, admin: User = Depends(admin_user)):
+    graph.delete_department(admin.tenant_id, department_id)
+
+
+@app.get("/admin/roles", response_model=list[RoleSummary])
+def admin_roles(admin: User = Depends(admin_user)):
+    return graph.list_roles(admin.tenant_id)
+
+
+@app.post("/admin/roles", response_model=RoleSummary, status_code=status.HTTP_201_CREATED)
+def create_role(payload: CreateRoleRequest, admin: User = Depends(admin_user)):
+    return graph.create_role(admin.tenant_id, payload.name)
+
+
+@app.post("/admin/roles/{role_id}", response_model=RoleSummary)
+def update_role(role_id: str, payload: RoleUpdateRequest, admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    emails = [str(email).lower() for email in payload.user_emails]
+    users = db.scalars(select(User).where(User.email.in_(emails), User.tenant_id == admin.tenant_id, User.is_admin.is_(False))).all() if emails else []
+    if len(users) != len(set(emails)):
+        raise HTTPException(status_code=400, detail="Choose existing non-admin users only")
+    user_entries = [{"id": u.id, "email": u.email} for u in users]
+    graph.set_role_members_and_docs(admin.tenant_id, role_id, user_entries, payload.document_ids)
+    roles = graph.list_roles(admin.tenant_id)
+    target = next((r for r in roles if r["id"] == role_id.lower()), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return target
+
+
+@app.delete("/admin/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_role(role_id: str, admin: User = Depends(admin_user)):
+    graph.delete_role(admin.tenant_id, role_id)
+
+
+@app.post("/admin/reload-api-key")
+def reload_api_key(payload: dict, _: User = Depends(admin_user)):
+    """Hot-swap the Gemini API key without restarting the container.
+    Send: {"api_key": "YOUR_NEW_KEY"}
+    """
+    new_key = str(payload.get("api_key", "")).strip()
+    if not new_key:
+        raise HTTPException(status_code=400, detail="api_key must not be empty")
+    retrieval.reload_api_key(new_key)
+    return {"status": "ok", "message": "Gemini API key reloaded successfully"}
 
 def chunk_text(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
     normalized = " ".join(text.split())
@@ -137,7 +255,11 @@ def chunk_text(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
 async def upload_document(
     file: UploadFile = File(...),
     document_name: str = Form(""),
+    user_emails_str: str = Form(""),
+    departments_str: str = Form(""),
+    roles_str: str = Form(""),
     user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
 ):
     if Path(file.filename or "").suffix.lower() != ".pdf":
         raise HTTPException(status_code=415, detail="Only PDF documents are supported")
@@ -151,9 +273,19 @@ async def upload_document(
     chunks = chunk_text(text)
     if not chunks:
         raise HTTPException(status_code=422, detail="No extractable text was found in this PDF")
+
+    user_emails = [e.strip().lower() for e in user_emails_str.split(",") if e.strip()] if user_emails_str else []
+    departments = [d.strip() for d in departments_str.split(",") if d.strip()] if departments_str else []
+    roles = [r.strip() for r in roles_str.split(",") if r.strip()] if roles_str else []
+
+    user_entries = []
+    if user_emails:
+        db_users = db.scalars(select(User).where(User.email.in_(user_emails), User.tenant_id == user.tenant_id, User.is_admin.is_(False))).all()
+        user_entries = [{"id": u.id, "email": u.email} for u in db_users]
+
     try:
         title = document_name.strip() or Path(file.filename or "Untitled document.pdf").stem
-        document_id = graph.create_admin_document(user.tenant_id, title, [], [], [])
+        document_id = graph.create_admin_document(user.tenant_id, title, user_entries, departments, roles)
         retrieval.index_document(document_id, title, user.tenant_id, chunks)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
