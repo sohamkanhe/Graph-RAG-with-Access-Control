@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "models/gemini-embedding-001"
     gemini_temperature: float = 0.7
     cors_origins: str = "http://localhost:5173"
+    redis_url: str = "redis://redis:6379/0"
 
 
 settings = Settings()

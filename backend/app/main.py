@@ -58,7 +58,8 @@ async def lifespan(_: FastAPI):
                 db.add(User(id=new_user_id(), email=email.lower(), password_hash=hash_password(password), display_name=display_name, tenant_id="acme", is_admin=False))
         db.commit()
     yield
-    graph.driver.close()
+    graph.close()
+    retrieval.close()
 
 
 app = FastAPI(title="Secure Enterprise RAG API", lifespan=lifespan)
@@ -71,7 +72,10 @@ def auth_response(user: User) -> AuthResponse:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "redis": graph.is_redis_connected(),
+    }
 
 
 @app.post("/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
@@ -300,10 +304,19 @@ def user_upload_disabled(_: User = Depends(current_user)):
 @app.post("/search", response_model=SearchResponse)
 def search(payload: SearchRequest, user: User = Depends(current_user)):
     allowed_ids = graph.allowed_documents(user.id, user.tenant_id)
+    if not allowed_ids:
+        return {"answer": "No authorized documents matched this request.", "citations": [], "authorized_document_count": 0}
+
+    cached = retrieval.get_cached_search(user.tenant_id, allowed_ids, payload.query)
+    if cached:
+        return cached
+
     try:
         chunks = retrieval.search(payload.query, user.tenant_id, allowed_ids)
         answer = retrieval.synthesize(payload.query, chunks)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     citations = [{"document_id": chunk["document_id"], "title": chunk["title"], "excerpt": chunk["text"][:240]} for chunk in chunks]
-    return {"answer": answer, "citations": citations, "authorized_document_count": len(allowed_ids)}
+    response_data = {"answer": answer, "citations": citations, "authorized_document_count": len(allowed_ids)}
+    retrieval.cache_search(user.tenant_id, allowed_ids, payload.query, response_data)
+    return response_data

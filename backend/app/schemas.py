@@ -107,3 +107,36 @@ class DocumentUploadResponse(BaseModel):
     document_id: str
     title: str
     chunk_count: int
+
+
+class ChatMessageSchema(BaseModel):
+    id: str
+    session_id: str
+    role: str
+    content: str
+    citations: list[dict] | None = None
+    authorized_document_count: int = 0
+    created_at: str | None = None
+
+
+class ChatSessionSummary(BaseModel):
+    id: str
+    title: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ChatSessionDetail(BaseModel):
+    id: str
+    title: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    messages: list[ChatMessageSchema] = []
+
+
+class CreateChatSessionRequest(BaseModel):
+    title: str = "New Chat"
+
+
+class SendMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
