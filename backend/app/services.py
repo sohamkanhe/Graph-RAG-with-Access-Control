@@ -62,7 +62,6 @@ class AuthorizationGraph:
         if self.redis:
             try:
                 self.redis.delete(f"auth:allowed_docs:{tenant_id}:{user_id}")
-                self.invalidate_tenant_search_cache(tenant_id)
             except Exception as e:
                 print(f"[Redis Invalidate Error] {e}")
 
@@ -72,18 +71,8 @@ class AuthorizationGraph:
                 keys = list(self.redis.scan_iter(f"auth:allowed_docs:{tenant_id}:*"))
                 if keys:
                     self.redis.delete(*keys)
-                self.invalidate_tenant_search_cache(tenant_id)
             except Exception as e:
                 print(f"[Redis Invalidate Tenant Error] {e}")
-
-    def invalidate_tenant_search_cache(self, tenant_id: str):
-        if self.redis:
-            try:
-                search_keys = list(self.redis.scan_iter(f"search:answer:{tenant_id}:*"))
-                if search_keys:
-                    self.redis.delete(*search_keys)
-            except Exception as e:
-                print(f"[Redis Invalidate Search Error] {e}")
 
     def seed_documents(self):
         constraints = [
@@ -425,59 +414,22 @@ class AuthorizationGraph:
 class RetrievalService:
     def __init__(self):
         self.qdrant = QdrantClient(url=settings.qdrant_url)
-        self.redis = get_redis_client()
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model=settings.gemini_embedding_model,
             google_api_key=settings.google_api_key,
+            max_retries=1,
         ) if settings.google_api_key else None
         self.chat = ChatGoogleGenerativeAI(
             model=settings.gemini_chat_model,
             temperature=settings.gemini_temperature,
             google_api_key=settings.google_api_key,
+            max_retries=1,
         ) if settings.google_api_key else None
 
     def close(self):
-        if self.redis:
-            try:
-                self.redis.close()
-            except Exception:
-                pass
-
-    def get_cached_search(self, tenant_id: str, allowed_ids: list[str], query: str) -> dict | None:
-        if not self.redis:
-            return None
-        try:
-            norm_query = query.strip().lower()
-            sorted_ids = ",".join(sorted(allowed_ids))
-            cache_key = f"search:answer:{tenant_id}:{hashlib.sha256((norm_query + '||' + sorted_ids).encode()).hexdigest()}"
-            cached = self.redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except Exception as e:
-            print(f"[Redis Search Cache Error] {e}")
-        return None
-
-    def cache_search(self, tenant_id: str, allowed_ids: list[str], query: str, data: dict):
-        if not self.redis:
-            return
-        try:
-            norm_query = query.strip().lower()
-            sorted_ids = ",".join(sorted(allowed_ids))
-            cache_key = f"search:answer:{tenant_id}:{hashlib.sha256((norm_query + '||' + sorted_ids).encode()).hexdigest()}"
-            self.redis.setex(cache_key, 600, json.dumps(data))
-        except Exception as e:
-            print(f"[Redis Cache Search Error] {e}")
+        pass
 
     def _embedding(self, text: str) -> list[float]:
-        cache_key = f"embed:text:{hashlib.sha256(text.encode()).hexdigest()}"
-        if self.redis:
-            try:
-                cached = self.redis.get(cache_key)
-                if cached:
-                    return json.loads(cached)
-            except Exception:
-                pass
-
         vector = None
         if self.embeddings:
             for attempt in range(3):
@@ -497,12 +449,6 @@ class RetrievalService:
         if not vector:
             vector = self._fallback_embedding(text, 3072 if self.embeddings else 256)
 
-        if self.redis and vector:
-            try:
-                self.redis.setex(cache_key, 86400, json.dumps(vector))
-            except Exception:
-                pass
-
         return vector
 
     def _fallback_embedding(self, text: str, size: int) -> list[float]:
@@ -513,30 +459,13 @@ class RetrievalService:
         return [value / magnitude for value in vector]
 
     def _embed_documents_batched(self, chunks: list[str], batch_size: int = 16) -> list[list[float]]:
-        cached_vectors = {}
-        uncached_indices = []
+        if not chunks:
+            return []
 
-        for idx, chunk in enumerate(chunks):
-            cache_key = f"embed:text:{hashlib.sha256(chunk.encode()).hexdigest()}"
-            if self.redis:
-                try:
-                    cached = self.redis.get(cache_key)
-                    if cached:
-                        cached_vectors[idx] = json.loads(cached)
-                        continue
-                except Exception:
-                    pass
-            uncached_indices.append(idx)
-
-        if not uncached_indices:
-            return [cached_vectors[i] for i in range(len(chunks))]
-
-        uncached_chunks = [chunks[i] for i in uncached_indices]
         computed_vectors = []
-
         if self.embeddings:
-            for i in range(0, len(uncached_chunks), batch_size):
-                batch = uncached_chunks[i:i + batch_size]
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i + batch_size]
                 batch_vectors = None
 
                 for attempt in range(4):
@@ -558,22 +487,12 @@ class RetrievalService:
 
                 computed_vectors.extend(batch_vectors)
 
-                if i + batch_size < len(uncached_chunks):
+                if i + batch_size < len(chunks):
                     time.sleep(0.5)
         else:
-            computed_vectors = [self._fallback_embedding(chunk, 256) for chunk in uncached_chunks]
+            computed_vectors = [self._fallback_embedding(chunk, 256) for chunk in chunks]
 
-        for idx_in_uncached, orig_idx in enumerate(uncached_indices):
-            vec = computed_vectors[idx_in_uncached]
-            cached_vectors[orig_idx] = vec
-            if self.redis:
-                try:
-                    cache_key = f"embed:text:{hashlib.sha256(chunks[orig_idx].encode()).hexdigest()}"
-                    self.redis.setex(cache_key, 86400 * 7, json.dumps(vec))
-                except Exception:
-                    pass
-
-        return [cached_vectors[i] for i in range(len(chunks))]
+        return computed_vectors
 
     def search(self, query: str, tenant_id: str, allowed_ids: list[str]) -> list[dict]:
         if not allowed_ids:
@@ -608,11 +527,13 @@ class RetrievalService:
             self.embeddings = GoogleGenerativeAIEmbeddings(
                 model=settings.gemini_embedding_model,
                 google_api_key=new_key,
+                max_retries=1,
             )
             self.chat = ChatGoogleGenerativeAI(
                 model=settings.gemini_chat_model,
                 temperature=settings.gemini_temperature,
                 google_api_key=new_key,
+                max_retries=1,
             )
         else:
             self.embeddings = None

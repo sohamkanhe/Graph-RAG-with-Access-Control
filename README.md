@@ -23,12 +23,17 @@ Before any vector search is executed, user permissions are verified and resolved
   - **Exponential Backoff**: Automatic retries with exponential backoff on `RESOURCE_EXHAUSTED` / 429 quota spikes.
   - **Extractive Fallback**: If the live LLM is completely unavailable, the engine falls back to extractive source grounding rather than crashing.
   - **Runtime API Key Hot-Reloading**: Swap exhausted Gemini API keys directly from the Admin UI or API without restarting Docker containers.
+- **ChatGPT / Gemini Style Conversational Interface**:
+  - **Left Sidebar**: Collapsible history drawer with `+ New Chat` button, real-time thread list, active chat highlighting, and deletion controls.
+  - **Persistent PostgreSQL Storage**: All conversations, questions, assistant responses, citations, and authorized document metrics are permanently stored in PostgreSQL tables (`chat_sessions` and `chat_messages`).
+  - **Interactive Message Stream**: User bubbles, assistant bubbles with custom markdown parsing (lists, bold text, headers, and clickable citation badges), inline citation cards, and animated thinking indicators.
 - **Strict Vector Isolation**:
   - Authorized document IDs are resolved *server-side* and injected into Qdrant payload filters (`document_id IN allowed_ids` and `tenant_id == tenant`). Un-authorized vectors are never retrieved or passed to the LLM.
-- **Interactive Admin Console**:
+- **Interactive Admin Console & View Switcher**:
   - Four dedicated management tabs: **Documents**, **Users**, **Departments**, and **Roles**.
   - Document detail view to assign/remove direct users, departments, and roles.
   - User detail view to inspect effective graph-derived document permissions and toggle memberships.
+  - Header toggle for administrators to switch between the **Admin Console** and the **Knowledge Chat Studio**.
 
 ---
 

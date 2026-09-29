@@ -8,10 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .config import settings
 from .database import Base, engine, get_db, migrate_users_table
-from .models import User
+from .models import User, ChatSession, ChatMessage
 from pypdf import PdfReader
 from .schemas import (
     AuthResponse,
+    ChatMessageSchema,
+    ChatSessionDetail,
+    ChatSessionSummary,
+    CreateChatSessionRequest,
     CreateDepartmentRequest,
     CreateRoleRequest,
     DepartmentSummary,
@@ -25,6 +29,7 @@ from .schemas import (
     RoleUpdateRequest,
     SearchRequest,
     SearchResponse,
+    SendMessageRequest,
     UserDetail,
     UserPermissionsRequest,
     UserSummary,
@@ -307,16 +312,150 @@ def search(payload: SearchRequest, user: User = Depends(current_user)):
     if not allowed_ids:
         return {"answer": "No authorized documents matched this request.", "citations": [], "authorized_document_count": 0}
 
-    cached = retrieval.get_cached_search(user.tenant_id, allowed_ids, payload.query)
-    if cached:
-        return cached
-
     try:
         chunks = retrieval.search(payload.query, user.tenant_id, allowed_ids)
         answer = retrieval.synthesize(payload.query, chunks)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     citations = [{"document_id": chunk["document_id"], "title": chunk["title"], "excerpt": chunk["text"][:240]} for chunk in chunks]
-    response_data = {"answer": answer, "citations": citations, "authorized_document_count": len(allowed_ids)}
-    retrieval.cache_search(user.tenant_id, allowed_ids, payload.query, response_data)
-    return response_data
+    return {"answer": answer, "citations": citations, "authorized_document_count": len(allowed_ids)}
+
+
+@app.get("/chats", response_model=list[ChatSessionSummary])
+def list_chats(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    sessions = db.scalars(
+        select(ChatSession)
+        .where(ChatSession.user_id == user.id)
+        .order_by(ChatSession.updated_at.desc())
+    ).all()
+    return [
+        ChatSessionSummary(
+            id=s.id,
+            title=s.title,
+            created_at=s.created_at.isoformat() if s.created_at else None,
+            updated_at=s.updated_at.isoformat() if s.updated_at else None,
+        )
+        for s in sessions
+    ]
+
+
+@app.post("/chats", response_model=ChatSessionSummary, status_code=status.HTTP_201_CREATED)
+def create_chat(payload: CreateChatSessionRequest = CreateChatSessionRequest(), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    session = ChatSession(
+        id=new_user_id(),
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        title=payload.title.strip() or "New Chat",
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return ChatSessionSummary(
+        id=session.id,
+        title=session.title,
+        created_at=session.created_at.isoformat() if session.created_at else None,
+        updated_at=session.updated_at.isoformat() if session.updated_at else None,
+    )
+
+
+@app.get("/chats/{chat_id}", response_model=ChatSessionDetail)
+def get_chat(chat_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    session = db.get(ChatSession, chat_id)
+    if not session or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatSessionDetail(
+        id=session.id,
+        title=session.title,
+        created_at=session.created_at.isoformat() if session.created_at else None,
+        updated_at=session.updated_at.isoformat() if session.updated_at else None,
+        messages=[
+            ChatMessageSchema(
+                id=m.id,
+                session_id=m.session_id,
+                role=m.role,
+                content=m.content,
+                citations=m.citations or [],
+                authorized_document_count=m.authorized_document_count,
+                created_at=m.created_at.isoformat() if m.created_at else None,
+            )
+            for m in session.messages
+        ],
+    )
+
+
+@app.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat(chat_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    session = db.get(ChatSession, chat_id)
+    if not session or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    db.delete(session)
+    db.commit()
+
+
+@app.post("/chats/{chat_id}/messages")
+def send_chat_message(chat_id: str, payload: SendMessageRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    session = db.get(ChatSession, chat_id)
+    if not session or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    user_msg_content = payload.message.strip()
+
+    # 1. Save user message to PostgreSQL
+    user_msg = ChatMessage(
+        id=new_user_id(),
+        session_id=session.id,
+        role="user",
+        content=user_msg_content,
+    )
+    db.add(user_msg)
+
+    if session.title == "New Chat":
+        session.title = user_msg_content[:40].strip() + ("..." if len(user_msg_content) > 40 else "")
+
+    # 2. Graph Authorization check via Neo4j / Redis
+    allowed_ids = graph.allowed_documents(user.id, user.tenant_id)
+    citations = []
+
+    if not allowed_ids:
+        answer = "No authorized documents matched this request."
+    else:
+        try:
+            chunks = retrieval.search(user_msg_content, user.tenant_id, allowed_ids)
+            answer = retrieval.synthesize(user_msg_content, chunks)
+            citations = [{"document_id": chunk["document_id"], "title": chunk["title"], "excerpt": chunk["text"][:240]} for chunk in chunks]
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error))
+
+    # 3. Save assistant message to PostgreSQL
+    assistant_msg = ChatMessage(
+        id=new_user_id(),
+        session_id=session.id,
+        role="assistant",
+        content=answer,
+        citations=citations,
+        authorized_document_count=len(allowed_ids),
+    )
+    db.add(assistant_msg)
+    db.commit()
+    db.refresh(user_msg)
+    db.refresh(assistant_msg)
+
+    return {
+        "user_message": {
+            "id": user_msg.id,
+            "session_id": session.id,
+            "role": user_msg.role,
+            "content": user_msg.content,
+            "created_at": user_msg.created_at.isoformat() if user_msg.created_at else None,
+        },
+        "assistant_message": {
+            "id": assistant_msg.id,
+            "session_id": session.id,
+            "role": assistant_msg.role,
+            "content": assistant_msg.content,
+            "citations": assistant_msg.citations or [],
+            "authorized_document_count": assistant_msg.authorized_document_count,
+            "created_at": assistant_msg.created_at.isoformat() if assistant_msg.created_at else None,
+        },
+        "chat_title": session.title,
+    }
