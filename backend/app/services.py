@@ -180,7 +180,7 @@ class AuthorizationGraph:
                [x IN collect(DISTINCT u.email) WHERE x IS NOT NULL] AS user_emails,
                [x IN collect(DISTINCT coalesce(dept.name, dept.id)) WHERE x IS NOT NULL] AS departments,
                [x IN collect(DISTINCT coalesce(r.name, r.id)) WHERE x IS NOT NULL] AS roles
-        ORDER BY d.title
+        ORDER BY title
         """
         with self.driver.session() as session:
             return [dict(record) for record in session.run(query, tenant_id=tenant_id)]
