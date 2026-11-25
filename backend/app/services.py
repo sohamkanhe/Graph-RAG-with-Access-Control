@@ -147,6 +147,8 @@ class AuthorizationGraph:
 
     def create_admin_document(self, tenant_id: str, title: str, user_entries: list[dict], departments: list[str], roles: list[str]) -> str:
         document_id = f"doc_{uuid4().hex}"
+        clean_depts = [d.strip() for d in departments if d and d.strip()]
+        clean_roles = [r.strip() for r in roles if r and r.strip()]
         query = """
         CREATE (d:Document {id: $document_id, title: $title, tenant_id: $tenant_id, created_at: datetime()})
         FOREACH (entry IN $user_entries |
@@ -166,7 +168,7 @@ class AuthorizationGraph:
         )
         """
         with self.driver.session() as session:
-            session.run(query, tenant_id=tenant_id, document_id=document_id, title=title, user_entries=user_entries, departments=departments, roles=roles).consume()
+            session.run(query, tenant_id=tenant_id, document_id=document_id, title=title, user_entries=user_entries, departments=clean_depts, roles=clean_roles).consume()
         self.invalidate_tenant_auth_cache(tenant_id)
         return document_id
 
@@ -186,6 +188,8 @@ class AuthorizationGraph:
             return [dict(record) for record in session.run(query, tenant_id=tenant_id)]
 
     def set_document_permissions(self, document_id: str, tenant_id: str, user_entries: list[dict], departments: list[str], roles: list[str]) -> bool:
+        clean_depts = [d.strip() for d in departments if d and d.strip()]
+        clean_roles = [r.strip() for r in roles if r and r.strip()]
         query = """
         MATCH (d:Document {id: $document_id, tenant_id: $tenant_id})
         OPTIONAL MATCH (old_u:User)-[a1:DIRECT_ACCESS]->(d)
@@ -211,7 +215,7 @@ class AuthorizationGraph:
         RETURN count(d) AS found
         """
         with self.driver.session() as session:
-            found = bool(session.run(query, document_id=document_id, tenant_id=tenant_id, user_entries=user_entries, departments=departments, roles=roles).single()["found"])
+            found = bool(session.run(query, document_id=document_id, tenant_id=tenant_id, user_entries=user_entries, departments=clean_depts, roles=clean_roles).single()["found"])
         if found:
             self.invalidate_tenant_auth_cache(tenant_id)
         return found
