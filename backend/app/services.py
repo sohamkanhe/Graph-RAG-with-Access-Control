@@ -176,7 +176,7 @@ class AuthorizationGraph:
         OPTIONAL MATCH (u:User)-[:DIRECT_ACCESS]->(d)
         OPTIONAL MATCH (dept:Department)-[:CAN_READ]->(d)
         OPTIONAL MATCH (r:Role)-[:CAN_READ]->(d)
-        RETURN d.id AS id, d.title AS title,
+        RETURN d.id AS id, coalesce(d.title, d.id) AS title,
                [x IN collect(DISTINCT u.email) WHERE x IS NOT NULL] AS user_emails,
                [x IN collect(DISTINCT coalesce(dept.name, dept.id)) WHERE x IS NOT NULL] AS departments,
                [x IN collect(DISTINCT coalesce(r.name, r.id)) WHERE x IS NOT NULL] AS roles

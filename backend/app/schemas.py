@@ -26,7 +26,7 @@ class UserSummary(BaseModel):
 
 class DocumentSummary(BaseModel):
     id: str
-    title: str
+    title: str = "Untitled Document"
     user_emails: list[str] = []
     departments: list[str] = []
     roles: list[str] = []
